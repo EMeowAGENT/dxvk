@@ -68,6 +68,7 @@ namespace dxvk {
     VkRenderingAttachmentInfo depth = { };
     VkRenderingAttachmentInfo stencil = { };
     VkRenderingInfo rendering = { };
+    VkRenderingFragmentShadingRateAttachmentInfoKHR gazeVrs = { };
   };
 
 

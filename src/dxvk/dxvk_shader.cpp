@@ -1,4 +1,5 @@
 #include "dxvk_device.h"
+#include "dxvk_gaze_vrs.h"
 #include "dxvk_pipemanager.h"
 #include "dxvk_shader.h"
 #include "dxvk_shader_io.h"
@@ -343,16 +344,27 @@ namespace dxvk {
     }
 
     VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipelineCreateFlags2 linkFlags = flags;
 
-    if (stageMask & VK_SHADER_STAGE_VERTEX_BIT)
+    if (stageMask & VK_SHADER_STAGE_VERTEX_BIT) {
       pipeline = compileVertexShaderPipeline(stageInfo, flags);
-    else if (stageMask & VK_SHADER_STAGE_FRAGMENT_BIT)
+    } else if (stageMask & VK_SHADER_STAGE_FRAGMENT_BIT) {
+      if (dxvkGazeVrsEnabled(m_device)) {
+        // The pipeline may be used while a gaze shading rate attachment is
+        // bound, so it has to be created with the corresponding flag. The
+        // flag must also be propagated to the linked pipeline.
+        auto vrsFlag = VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
+        flags |= vrsFlag;
+        linkFlags |= vrsFlag;
+      }
+
       pipeline = compileFragmentShaderPipeline(stageInfo, flags);
-    else if (stageMask & VK_SHADER_STAGE_COMPUTE_BIT)
+    } else if (stageMask & VK_SHADER_STAGE_COMPUTE_BIT) {
       pipeline = compileComputeShaderPipeline(stageInfo, flags);
+    }
 
     // Should be unreachable
-    return { pipeline, flags };
+    return { pipeline, linkFlags };
   }
 
 
@@ -534,6 +546,20 @@ namespace dxvk {
 
     if (hasSampleRateShading)
       info.pMultisampleState  = &msInfo;
+
+    // The fragment shader pipeline always defers the shading rate to the
+    // render pass attachment. When no attachment is bound, the combiners
+    // result in 1x1, which is the same as the default state. This replaces
+    // vkCmdSetFragmentShadingRateKHR, which cannot be used inside secondary
+    // command buffers and therefore never applied to MSAA passes.
+    VkPipelineFragmentShadingRateStateCreateInfoKHR vrsInfo = { VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR };
+
+    if (dxvkGazeVrsEnabled(m_device)) {
+      vrsInfo.fragmentSize    = { 1u, 1u };
+      vrsInfo.combinerOps[0]  = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+      vrsInfo.combinerOps[1]  = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR;
+      vrsInfo.pNext           = std::exchange(info.pNext, &vrsInfo);
+    }
 
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);

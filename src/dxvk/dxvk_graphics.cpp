@@ -3,6 +3,7 @@
 #include "../util/util_time.h"
 
 #include "dxvk_device.h"
+#include "dxvk_gaze_vrs.h"
 #include "dxvk_graphics.h"
 #include "dxvk_pipemanager.h"
 
@@ -1462,6 +1463,9 @@ namespace dxvk {
     if (m_device->canUseDescriptorBuffer())
       flags.flags |= VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT;
 
+    if (dxvkGazeVrsEnabled(m_device))
+      flags.flags |= VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
+
     VkGraphicsPipelineCreateInfo info = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &key.foState.rtInfo };
     info.stageCount               = stageInfo.getStageCount();
     info.pStages                  = stageInfo.getStageInfos();
@@ -1476,6 +1480,15 @@ namespace dxvk {
     info.pDynamicState            = &key.dyState.dyInfo;
     info.layout                   = layout->getPipelineLayout();
     info.basePipelineIndex        = -1;
+
+    VkPipelineFragmentShadingRateStateCreateInfoKHR vrsInfo = { VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR };
+
+    if (dxvkGazeVrsEnabled(m_device)) {
+      vrsInfo.fragmentSize    = { 1u, 1u };
+      vrsInfo.combinerOps[0]  = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+      vrsInfo.combinerOps[1]  = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR;
+      vrsInfo.pNext           = std::exchange(info.pNext, &vrsInfo);
+    }
     
     if (!key.prState.tsInfo.patchControlPoints)
       info.pTessellationState = nullptr;

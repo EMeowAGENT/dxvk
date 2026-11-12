@@ -6,6 +6,7 @@
 #include "dxvk_context_state.h"
 #include "dxvk_descriptor_heap.h"
 #include "dxvk_descriptor_worker.h"
+#include "dxvk_gaze_vrs.h"
 #include "dxvk_implicit_resolve.h"
 #include "dxvk_latency.h"
 #include "dxvk_objects.h"
@@ -1334,6 +1335,9 @@ namespace dxvk {
   private:
     
     Rc<DxvkDevice>          m_device;
+    std::unique_ptr<DxvkGazeVrs> m_gazeVrs;
+    uint32_t                m_gazePassFrameId = ~0u;
+    uint32_t                m_gazePassSeq = 0u;
     DxvkObjects*            m_common;
 
     uint64_t                m_trackingId = 0u;

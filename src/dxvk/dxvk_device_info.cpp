@@ -46,6 +46,7 @@ namespace dxvk {
     HANDLE_EXT(khrDynamicRenderingLocalRead);      \
     HANDLE_EXT(khrExternalMemoryWin32);            \
     HANDLE_EXT(khrExternalSemaphoreWin32);         \
+    HANDLE_EXT(khrFragmentShadingRate);            \
     HANDLE_EXT(khrLoadStoreOpNone);                \
     HANDLE_EXT(khrMaintenance5);                   \
     HANDLE_EXT(khrMaintenance6);                   \
@@ -85,6 +86,7 @@ namespace dxvk {
     HANDLE_EXT(extSampleLocations);                \
     HANDLE_EXT(extTransformFeedback);              \
     HANDLE_EXT(extVertexAttributeDivisor);         \
+    HANDLE_EXT(khrFragmentShadingRate);            \
     HANDLE_EXT(khrMaintenance5);                   \
     HANDLE_EXT(khrMaintenance6);                   \
     HANDLE_EXT(khrMaintenance7);                   \
@@ -990,6 +992,9 @@ namespace dxvk {
       /* LOAD_OP_NONE for certain tiler optimizations. Core feature
        * in Vulkan 1.4, so probably supported by everything we need. */
       ENABLE_EXT(khrLoadStoreOpNone, true),
+
+      /* Gaze-driven VRS */
+      ENABLE_EXT_FEATURE(khrFragmentShadingRate, attachmentFragmentShadingRate, false),
 
       /* Maintenance features, relied on in various parts of the code */
       ENABLE_EXT_FEATURE(khrMaintenance5, maintenance5, true),

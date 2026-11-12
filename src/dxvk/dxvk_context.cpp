@@ -7,9 +7,16 @@
 
 #include "dxvk_device.h"
 #include "dxvk_context.h"
+#include "dxvk_gaze_dot.h"
 
 namespace dxvk {
   
+  // Bounds for the diagnostic per-pass trace below. Only the first slots of a
+  // frame are interesting, and the absolute line budget keeps a pass storm from
+  // flooding the log.
+  static constexpr uint32_t GazePassLogSlots = 16u;
+  static constexpr uint32_t GazePassLogLimit = 512u;
+
   DxvkContext::DxvkContext(const Rc<DxvkDevice>& device)
   : m_device      (device),
     m_common      (&device->m_objects),
@@ -6376,6 +6383,100 @@ namespace dxvk {
         useSecondaryCmdBuffer |= depthStencilAspects || colorInfoCount > 1u || !hasMipmappedRt;
     }
 
+    // Gaze-driven VRS: attach a shading rate image to eye passes. This has
+    // to happen for the primary and the secondary command buffer path alike,
+    // otherwise MSAA passes would never use the attachment.
+    if (dxvkGazeVrsEnabled(m_device.ptr())) {
+      if (!m_gazeVrs)
+        m_gazeVrs = std::make_unique<DxvkGazeVrs>(m_device.ptr());
+
+      auto& gazeInfo = m_state.om.renderingInfo.gazeVrs;
+      gazeInfo = { VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR };
+
+      const auto& gazeColor = framebufferInfo.getColorTarget(0u);
+
+      const VkFormat colorFormat = gazeColor.view
+        ? gazeColor.view->info().format : VK_FORMAT_UNDEFINED;
+      const uint32_t colorLayerCount = gazeColor.view
+        ? gazeColor.view->info().layerCount : 0u;
+      const uint32_t imageLayers = gazeColor.view
+        ? gazeColor.view->image()->info().numLayers : 0u;
+      const bool hasDepth = framebufferInfo.getDepthTarget().view != nullptr;
+      const uint32_t frameId = m_device->getCurrentFrameId();
+
+      if (m_gazePassFrameId != frameId) {
+        m_gazePassFrameId = frameId;
+        m_gazePassSeq = 0u;
+      }
+
+      const uint32_t passSeq = m_gazePassSeq++;
+
+      const bool gazeVrsActive = m_gazeVrs->prepare(m_cmd.ptr(),
+        VkExtent2D { fbSize.width, fbSize.height }, fbSize.layers,
+        colorFormat,
+        gazeColor.view ? gazeColor.view->image()->info().sampleCount : VK_SAMPLE_COUNT_1_BIT,
+        gazeColor.view ? gazeColor.view->image()->handle() : VK_NULL_HANDLE,
+        frameId,
+        gazeInfo);
+
+      // Diagnostic pass trace. Prints one line per pass slot of a frame and
+      // rewrites that line whenever the frame structure changes (menu opened,
+      // resolution switch, ...), so steady state stays quiet. Bounded so that
+      // an unexpected pass storm cannot flood the log.
+      if (gazeColor.view && passSeq < GazePassLogSlots) {
+        static uint64_t gazePassSignature[GazePassLogSlots] = { };
+        static uint32_t gazePassLogCount = 0u;
+
+        const VkViewport gvp = m_state.vp.viewportCount
+          ? m_state.vp.viewports[0] : VkViewport();
+
+        uint64_t signature = 0x9E3779B97F4A7C15ull;
+        auto mix = [&signature](uint64_t v) {
+          signature ^= v + 0x9E3779B97F4A7C15ull + (signature << 6) + (signature >> 2);
+        };
+        mix(fbSize.width); mix(fbSize.height);
+        mix(uint32_t(gvp.x)); mix(uint32_t(gvp.width)); mix(uint32_t(gvp.height));
+        mix(uint32_t(colorFormat)); mix(colorLayerCount); mix(imageLayers);
+        mix(hasDepth ? 1u : 0u);
+        mix(uint32_t(ops.colorOps[0].loadOp));
+        mix(uint32_t(ops.depthOps.loadOpD));
+        // Include the candidate decision so the startup transition from
+        // "no map ready yet" to "attachment active" is visible.
+        mix(gazeVrsActive ? 1u : 0u);
+
+        auto loadOpName = [](VkAttachmentLoadOp op) {
+          switch (op) {
+            case VK_ATTACHMENT_LOAD_OP_LOAD:      return "load";
+            case VK_ATTACHMENT_LOAD_OP_CLEAR:     return "clear";
+            case VK_ATTACHMENT_LOAD_OP_DONT_CARE: return "dontcare";
+            case VK_ATTACHMENT_LOAD_OP_NONE:      return "none";
+            default:                              return "?";
+          }
+        };
+
+        if (signature != gazePassSignature[passSeq] && gazePassLogCount < GazePassLogLimit) {
+          gazePassSignature[passSeq] = signature;
+          gazePassLogCount++;
+
+          Logger::info(str::format("GazeVRS: pass #", passSeq,
+            " ", fbSize.width, "x", fbSize.height,
+            " vp=", gvp.x, "+", gvp.width, "x", gvp.height,
+            " fmt=", uint32_t(colorFormat),
+            " layers=", colorLayerCount, "/", imageLayers,
+            " samples=", uint32_t(gazeColor.view->image()->info().sampleCount),
+            " depth=", hasDepth ? 1 : 0,
+            " color=", loadOpName(ops.colorOps[0].loadOp),
+            " depthop=", loadOpName(ops.depthOps.loadOpD),
+            " vpt=", m_state.vp.viewportCount,
+            " cand=", gazeVrsActive ? 1 : 0));
+        }
+      }
+
+      if (gazeVrsActive)
+        renderingInfo.pNext = &gazeInfo;
+    }
+
+
     if (useSecondaryCmdBuffer) {
       // Begin secondary command buffer on tiling GPUs so that subsequent
       // resolve, discard and clear commands can modify render pass ops.
@@ -6385,7 +6486,6 @@ namespace dxvk {
 
       m_cmd->beginSecondaryCommandBuffer(inheritance);
     } else {
-      // Begin rendering right away on regular GPUs
       m_cmd->cmdBeginRendering(DxvkCmdBuffer::ExecBuffer, &renderingInfo);
     }
 
@@ -6433,6 +6533,38 @@ namespace dxvk {
       auto& renderingInfo = m_state.om.renderingInfo.rendering;
       m_cmd->cmdBeginRendering(DxvkCmdBuffer::ExecBuffer, &renderingInfo);
       m_cmd->cmdExecuteCommands(1, &cmdBuffer);
+    }
+
+    if (g_gazeDot.passActive) {
+      g_gazeDot.passActive = false;
+
+      for (uint32_t i = 0u; i < g_gazeDot.count && i < 16u; i++) {
+        const auto& d = g_gazeDot.dots[i];
+
+        int32_t x0 = std::max(0, d.x - d.r);
+        int32_t y0 = std::max(0, d.y - d.r);
+        int32_t x1 = std::min(g_gazeDot.width,  d.x + d.r);
+        int32_t y1 = std::min(g_gazeDot.height, d.y + d.r);
+
+        if (x1 <= x0 || y1 <= y0)
+          continue;
+
+        VkClearAttachment dotClear = { };
+        dotClear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        dotClear.colorAttachment = 0u;
+        dotClear.clearValue.color.float32[0] = d.rgb[0];
+        dotClear.clearValue.color.float32[1] = d.rgb[1];
+        dotClear.clearValue.color.float32[2] = d.rgb[2];
+        dotClear.clearValue.color.float32[3] = 1.0f;
+
+        VkClearRect dotRect = { };
+        dotRect.rect.offset = { x0, y0 };
+        dotRect.rect.extent = { uint32_t(x1 - x0), uint32_t(y1 - y0) };
+        dotRect.baseArrayLayer = 0u;
+        dotRect.layerCount = 1u;
+
+        m_cmd->cmdClearAttachments(DxvkCmdBuffer::ExecBuffer, 1, &dotClear, 1, &dotRect);
+      }
     }
 
     // End actual rendering command

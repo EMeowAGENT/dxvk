@@ -1,4 +1,5 @@
 #include "dxvk_device.h"
+#include "dxvk_gaze_vrs.h"
 #include "dxvk_instance.h"
 #include "dxvk_latency_builtin.h"
 #include "dxvk_latency_reflex.h"
